@@ -6,7 +6,7 @@ import (
 	"bytes"
 		"sort"
 	"crypto/md5"
-)
+	)
 
 type Query interface {
 	Queryer(query firestore.Query) firestore.Query
@@ -14,9 +14,18 @@ type Query interface {
 	Order() int
 }
 
+type CursorQuery interface {
+	Queryer(query firestore.Query, cursor *Cursor, f *Foon) (firestore.Query, error)
+	Hash(cursor *Cursor) string
+}
+
 type Queries []Query
 
 type Conditions struct {
+	limit int
+	cursor *Cursor
+	cursorQuery CursorQuery
+	group   string
 	Queries Queries
 }
 
@@ -40,11 +49,21 @@ func (c ConditionURI) URI() string {
 
 func NewConditions() *Conditions {
 	return &Conditions{
+		limit: 210000000,
 		Queries: []Query{},
+		cursorQuery: nil,
+		cursor: nil,
 	}
 }
 
-var NoCondition = &Conditions{}
+func (w *Conditions) CollectionGroup(collectionId string) *Conditions {
+	w.group = collectionId
+	return w
+}
+
+func (w *Conditions) CollectionGroupWithKey(key *Key) *Conditions {
+	return w.CollectionGroup(key.Collection)
+}
 
 func (w *Conditions) Where(column string, operation string, value interface{}) *Conditions {
 	w.Queries = append(w.Queries, Where{column, operation, value})
@@ -52,6 +71,7 @@ func (w *Conditions) Where(column string, operation string, value interface{}) *
 }
 
 func (w *Conditions) Limit(limit int) *Conditions {
+	w.limit = limit
 	w.Queries = append(w.Queries, Limit(limit))
 	return w
 }
@@ -63,10 +83,41 @@ func (w *Conditions) Offset(offset int) *Conditions {
 
 func (w *Conditions) OrderBy(column string, direction firestore.Direction) *Conditions {
 	w.Queries = append(w.Queries, Order{column,direction})
+	if w.cursor == nil {
+		w.cursor = newCursor()
+	}
+	w.cursor.AddField(column, direction)
 	return w
 }
 
-// TODO: StartAt, StartAfter, EndsAt, EndsAfter ...etc
+func (w *Conditions) StartAfter(cursor *Cursor) *Conditions {
+	w.cursorQuery = &StartAfter{}
+	w.cursor = cursor
+	return w
+}
+
+// TODO: StartAt, EndsAt, EndsAfter ...etc
+
+type StartAfter struct {
+}
+
+func (w StartAfter) Queryer(query firestore.Query, cursor *Cursor, f *Foon) (firestore.Query, error) {
+	doc, err := cursor.snapshot(f)
+	if err != nil {
+		return query, err
+	}
+	query = cursor.setOrders(query)
+	query = query.StartAfter(doc)
+	return query, nil
+}
+
+func (w StartAfter) Hash(cursor *Cursor) string {
+	if cursor == nil {
+		return "startAfter"
+	}
+	return fmt.Sprintf("startAftr:%s", cursor.planeCursor())
+}
+
 
 type Where struct {
 	Column string
@@ -153,9 +204,18 @@ func (c Conditions) Hash() string {
 	sort.Sort(c.Queries)
 
 	buf := bytes.Buffer{}
+	if c.group != "" {
+		buf.WriteString(c.group)
+	}
+
 	for _, cond := range c.Queries {
 		buf.WriteString(cond.Hash())
 	}
+
+	if c.cursorQuery != nil {
+		buf.WriteString(c.cursorQuery.Hash(c.cursor))
+	}
+
 	hash := md5.New()
 	hash.Write(buf.Bytes())
 	return fmt.Sprintf("%x", hash.Sum(nil))
@@ -174,12 +234,22 @@ func (c Conditions) String() string {
 	return buf.String()
 }
 
-func (c Conditions) Query(ref *firestore.CollectionRef) firestore.Query {
-	query := ref.Query
+func (c Conditions) Query(query firestore.Query, f *Foon) (firestore.Query, error) {
+	return c.query(query, f)
+}
+
+func (c Conditions) query(query firestore.Query, f *Foon) (firestore.Query, error) {
 	for _ , q := range c.Queries {
 		query = q.Queryer(query)
 	}
-	return query
+	if c.cursor != nil && c.cursorQuery != nil {
+		q, err := c.cursorQuery.Queryer(query, c.cursor, f)
+		if err != nil {
+			return query, err
+		}
+		query = q
+	}
+	return query , nil
 }
 
 func (c Conditions) URI(key *Key) IURI {
@@ -187,4 +257,9 @@ func (c Conditions) URI(key *Key) IURI {
 		return CollectionCache.CreateURIByKey(key)
 	}
 	return ConditionURI(fmt.Sprintf("foon/%s/conds/%s", key.CollectionPath(), c.Hash()))
+}
+
+func (c Conditions) CursorURI(key *Key) IURI {
+	uri := c.URI(key)
+	return ConditionURI(fmt.Sprintf("%s/%s", uri.URI(), "cursor"))
 }

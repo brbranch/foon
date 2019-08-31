@@ -2,12 +2,12 @@ package foon
 
 import (
 	"cloud.google.com/go/firestore"
-	"firebase.google.com/go"
-	"google.golang.org/appengine"
-	"google.golang.org/api/iterator"
 	"context"
-	"fmt"
 	"errors"
+	"firebase.google.com/go"
+	"fmt"
+	"google.golang.org/api/iterator"
+	"google.golang.org/appengine"
 	"reflect"
 	"time"
 )
@@ -17,6 +17,7 @@ type Foon struct {
 	context.Context
 	cache       *FirestoreCache
 	client      FirestoreClient
+	cursor      *Cursor
 	transaction bool
 	logger      Logger
 }
@@ -58,6 +59,7 @@ func NewStoreWithProjectID(ctx context.Context, projectID string) (*Foon, error)
 		client:      &FirestoreClientImpl{ctx, client},
 		cache:       &FirestoreCache{ctx, logger},
 		transaction: false,
+		cursor:      nil,
 		logger:      &defaultLogger{ctx},
 	}, nil
 }
@@ -68,6 +70,7 @@ func newStoreWithTransaction(foon *Foon, context context.Context, transaction *f
 		Context:     context,
 		client:      &FirestoreTransactionClient{transaction, foon.client.Client()},
 		cache:       foon.cache,
+		cursor:      nil,
 		transaction: true,
 		logger:      foon.logger,
 	}
@@ -136,10 +139,14 @@ func (s *Foon) PutMulti(slices interface{}) error {
 		return err
 	}
 
+	keys := map[string]*Key{}
+
 	length := value.Len()
 	for i := 0; i < length; i++ {
 		res := value.Index(i).Interface()
 		batch.Set(res)
+		key := NewKey(res)
+		keys[key.Path()] = key
 	}
 
 	return batch.Commit()
@@ -164,8 +171,8 @@ func (s *Foon) insert(info *fields, src interface{}) error {
 			return err
 		}
 
-		metadata := LoadMetadata(s.cache, key)
-		metadata.DeleteAll()
+		LoadMetadata(s.cache, key).DeleteAll()
+		LoadGroupMetaData(s.cache, key).DeleteAll()
 		return nil
 	}
 	if err := s.execute(command); err != nil {
@@ -184,8 +191,9 @@ func (s *Foon) put(info *fields, src interface{}) error {
 		info.UpdateTime(time.Now())
 
 		_, err := ref.Set(s, src)
-		metadata := LoadMetadata(s.cache, key)
-		metadata.DeleteAll()
+
+		LoadMetadata(s.cache, key).DeleteAll()
+		LoadGroupMetaData(s.cache, key).DeleteAll()
 
 		return err
 	})
@@ -220,8 +228,52 @@ func (s *Foon) Get(src interface{}) error {
 	return s.getWithoutCache(info, src)
 }
 
+func (s *Foon) GetByKey(key *Key, src interface{}) error {
+	if s.transaction {
+		return s.getByKeyWithoutCache(key, src)
+	}
+
+	if err := s.cache.Get(key, src); err == nil {
+		return nil
+	} else if !NoSuchDocument.Is(err) {
+		s.warningf("failed to get Memcache %+v", err)
+	}
+	return s.getByKeyWithoutCache(key, src)
+}
+
+func (s *Foon) getByKeyWithoutCache(key *Key, src interface{}) error {
+	info, err := newFields(src)
+	key.Inject(info)
+
+	if err != nil {
+		s.logger.Warning("failed to create fields")
+		return err
+	}
+	err = s.execute(func(client FirestoreClient) error {
+		docRef := key.CreateDocumentRef(client.Client())
+		s.logger.Trace(fmt.Sprintf("try to get firestore (path: %s)", docRef.Path))
+		doc, err := docRef.Get(s)
+		if err != nil {
+			if doc != nil && doc.Exists() == false {
+				s.logger.Trace("not found")
+				return NoSuchDocument
+			}
+			s.logger.Warning(fmt.Sprintf("failed to get document (reason:%v)", err))
+			return err
+		}
+		s.logger.Trace(fmt.Sprintf("get firestore (path: %s, exists: %v)", docRef.Path, doc.Exists()))
+		info.updateKey(docRef)
+
+		return doc.DataTo(src)
+	})
+	if err != nil {
+		return err
+	}
+	return s.setMemcache(info, src)
+}
+
 func (s *Foon) GetAll(key *Key, src interface{}) error {
-	return s.GetByQuery(key, src, NoCondition)
+	return s.GetByQuery(key, src, &Conditions{})
 }
 
 func (s *Foon) GetMulti(src interface{}) error {
@@ -371,6 +423,28 @@ func (s *Foon) GetByQueryWithoutCache(key *Key, src interface{}, conditions *Con
 	return s.getChildrenWithoutCache(key, src, conditions)
 }
 
+func (s *Foon) GetGroupByQuery(src interface{}, conditions *Conditions) error {
+	if err := s.validSlice(src); err != nil {
+		return err
+	}
+	value := reflect.Indirect(reflect.ValueOf(src))
+	elem := value.Type().Elem()
+	for {
+		if elem.Kind() == reflect.Ptr {
+			elem = elem.Elem()
+		} else {
+			break
+		}
+	}
+	val := reflect.New(elem)
+	key := newGroupKey(val.Interface())
+	if conditions == nil {
+		conditions = NewConditions()
+	}
+	conditions.CollectionGroupWithKey(key)
+	return s.GetByQuery(key, src, conditions)
+}
+
 func (s *Foon) GetByQuery(key *Key, src interface{}, conditions *Conditions) error {
 	if err := s.validSlice(src); err != nil {
 		return err
@@ -380,9 +454,20 @@ func (s *Foon) GetByQuery(key *Key, src interface{}, conditions *Conditions) err
 		return s.getChildrenWithoutCache(key, src, conditions)
 	}
 
-	metadata := LoadMetadata(s.cache, key)
+	var metadata *CacheMetadata = nil
+
+	if(conditions.group != "") {
+		metadata = LoadGroupMetaData(s.cache, key)
+	} else {
+		metadata = LoadMetadata(s.cache, key)
+	}
+
 	if err := metadata.Load(conditions.URI(key), src); err == nil {
-		s.logger.Trace("cache is hit! ")
+		s.logger.Trace("cache is hit! " + key.Path())
+		cursor := newCursor()
+		if err := metadata.Load(conditions.CursorURI(key), cursor); err == nil {
+			s.cursor = cursor
+		}
 		return nil
 	}
 
@@ -392,19 +477,48 @@ func (s *Foon) GetByQuery(key *Key, src interface{}, conditions *Conditions) err
 func (s *Foon) getChildrenWithoutCache(parentKey *Key, slices interface{}, conditions *Conditions) error {
 	value := reflect.Indirect(reflect.ValueOf(slices))
 
-	col := parentKey.CreateCollectionRef(s.client.Client())
-	it := conditions.Query(col).Documents(s)
+
+	var it *firestore.DocumentIterator = nil
+	var meta *CacheMetadata = nil
+	if conditions.group != "" {
+		col := parentKey.CreateGroupCollectionRef(s.client.Client())
+		query , err := conditions.Query(col.Query, s)
+		if err != nil {
+			return err
+		}
+		it = query.Documents(s)
+		meta = LoadGroupMetaData(s.cache, parentKey)
+	} else {
+		col := parentKey.CreateCollectionRef(s.client.Client())
+		query , err := conditions.Query(col.Query, s)
+		if err != nil {
+			return err
+		}
+		it = query.Documents(s)
+		meta = LoadMetadata(s.cache, parentKey)
+	}
+
+
+	if conditions.cursor != nil {
+		s.cursor = conditions.cursor.NewCursorWithOrders()
+	}
+	// FIXME: カーソルでstartedAfterを使うとうまくいかない
+	var lastDoc *firestore.DocumentSnapshot = nil
+	var interfaces interface{} = nil
 
 	for {
 		doc, err := it.Next()
+		conditions.limit--
 		if err != nil {
 			if err == iterator.Done {
 				break
 			}
+			s.logger.Warning(fmt.Sprintf("failed to get next (reason: %v)", err))
 			return err
 		}
-
+		lastDoc = doc
 		src := reflect.New(value.Type().Elem()).Interface()
+		interfaces = src
 		if err := doc.DataTo(src); err != nil {
 			return err
 		}
@@ -413,10 +527,34 @@ func (s *Foon) getChildrenWithoutCache(parentKey *Key, slices interface{}, condi
 	}
 
 	dst := value.Interface()
-	meta := LoadMetadata(s.cache, parentKey)
+
 	meta.Put(conditions.URI(parentKey), dst)
 
+	if lastDoc != nil && interfaces != nil && conditions.limit <= 0 && conditions.cursor != nil{
+		s.cursor.ID = getIdField(reflect.ValueOf(interfaces))
+		s.logger.Trace(fmt.Sprintf("this is ok : %s : %+v", s.cursor.ID, value))
+		s.cursor.Path = NewKeyWithPath(lastDoc.Ref.Path).Path()
+
+		meta.Put(conditions.CursorURI(parentKey), s.cursor)
+	}
+
 	return nil
+}
+
+func (s *Foon) LastCursor() string {
+	if s.cursor == nil {
+		s.logger.Trace("cursor is nil")
+		return ""
+	}
+	if s.cursor.ID == "" {
+		s.logger.Trace("id is empty")
+		return ""
+	}
+	if s.cursor.Path == "" {
+		s.logger.Trace("cursor path is empty")
+		return ""
+	}
+	return s.cursor.String()
 }
 
 func (s *Foon) GetWithoutCache(src interface{}) error {
@@ -463,10 +601,13 @@ func (s *Foon) getWithoutCache(info *fields, src interface{}) error {
 		doc, err := docRef.Get(s)
 		if err != nil {
 			if doc != nil && doc.Exists() == false {
+				s.logger.Trace("not found")
 				return NoSuchDocument
 			}
+			s.logger.Warning(fmt.Sprintf("failed to get document (reason:%v)", err))
 			return err
 		}
+		s.logger.Trace(fmt.Sprintf("get firestore (path: %s, exists: %v)", docRef.Path, doc.Exists()))
 		info.updateKey(docRef)
 
 		return doc.DataTo(src)
@@ -509,6 +650,10 @@ func (s *Foon) setMemcacheWithKey(key string, src interface{}) error {
 func (s *Foon) Delete(src interface{}) error {
 	key := NewKey(src)
 	s.cache.Delete(key)
+
+	LoadMetadata(s.cache, key).DeleteAll()
+	LoadGroupMetaData(s.cache, key).DeleteAll()
+
 	return s.client.Delete(key.CreateDocumentRef(s.client.Client()))
 }
 
@@ -533,3 +678,4 @@ func (s *Foon) validSlice(src interface{}) error {
 
 	return nil
 }
+
