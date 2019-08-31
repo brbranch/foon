@@ -45,6 +45,7 @@ func TestIdField_ノーマルのテスト(t *testing.T) {
 	fld , err := newIDField(test)
 	assert.NoError(t, err , "Failed to get Fields")
 
+	assert.Equal(t, "ID", fld.FieldName)
 	assert.Equal(t , "test", fld.ID)
 	assert.Equal(t , "test", test.ID)
 	fld.SetID("bcde")

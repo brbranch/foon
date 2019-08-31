@@ -10,6 +10,8 @@ type IURI interface {
 	URI() string
 }
 
+
+
 /** クエリ結果などを保持するためのキャッシュ (関連のPut時には全削除される) */
 type CacheMetadata struct {
 	Item  *CacheMetadataItem
@@ -26,8 +28,16 @@ type MetadataItem struct {
 	Data interface{}
 }
 
+func LoadGroupMetaData(cache *FirestoreCache, key *Key) *CacheMetadata {
+	return loadMataData(GroupDataCache.CreateCollectionURIByKey(key).URI(), cache)
+}
+
 func LoadMetadata(cache *FirestoreCache, key *Key) *CacheMetadata {
 	path := MetadataCache.CreateURIByKey(key).URI()
+	return loadMataData(path, cache)
+}
+
+func loadMataData(path string, cache *FirestoreCache) *CacheMetadata {
 	res := &CacheMetadataItem{}
 
 	cache.logger.Trace(fmt.Sprintf("load metadata (key: %s)", path))
@@ -58,6 +68,7 @@ func (c *CacheMetadata) DeleteAll() error {
 	}
 	keys := []string{}
 	for _, path := range c.Item.Data {
+		c.cache.logger.Trace(fmt.Sprintf("delete metadata cache (%s)", path))
 		keys = append(keys, path)
 	}
 	keys = append(keys, c.Item.MemcachePath)

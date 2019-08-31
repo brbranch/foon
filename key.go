@@ -4,6 +4,7 @@ import (
 	"cloud.google.com/go/firestore"
 	"fmt"
 	"regexp"
+	"reflect"
 )
 
 type Key struct {
@@ -25,6 +26,25 @@ func newKey(fields *fields) *Key {
 		res.ID = fields.id.ID
 	}
 	return res
+}
+
+func newGroupKey(src interface{}) *Key {
+	if info, ok := src.(*fields); ok {
+		return &Key{
+			ParentPath: "",
+			Collection: info.CollectionName(),
+			ID: "",
+		}
+	}
+	info, err := newFields(src)
+	if err != nil {
+		panic(fmt.Sprintf("error is occurred (reason: %+v)" , err))
+	}
+	return &Key{
+		ParentPath: "",
+		Collection: info.CollectionName(),
+		ID: "",
+	}
 }
 
 func NewKey(src interface{}) *Key {
@@ -57,15 +77,82 @@ func (k *Key) SamePath(ref *firestore.DocumentRef) bool {
 	return k.Equals(other)
 }
 
+func (k *Key) ParentKey() *Key {
+	if k.ParentPath == "" {
+		return nil
+	}
+	r := regexp.MustCompile(`^(.*)?/([^/]+)/([^/]+)$`)
+	if r.MatchString(k.ParentPath) {
+		res := &Key{}
+		matchs := r.FindAllStringSubmatch(k.ParentPath, -1)
+		res.ParentPath = matchs[0][1]
+		res.Collection = matchs[0][2]
+		res.ID = matchs[0][3]
+		return res
+	}
+	r = regexp.MustCompile(`^([^/]+)/([^/]+)$`)
+	if r.MatchString(k.ParentPath) {
+		res := &Key{}
+		matchs := r.FindAllStringSubmatch(k.ParentPath, -1)
+		res.ParentPath = ""
+		res.Collection = matchs[0][1]
+		res.ID = matchs[0][2]
+		return res
+	}
+	return nil
+}
+
+func (k *Key) Inject(src interface{}) error {
+	if info, ok := src.(*fields); ok {
+		 k.injectFields(info)
+		 return nil
+	}
+	info, err := newFields(src)
+	if err != nil {
+		return err
+	}
+	k.injectFields(info)
+	return nil
+}
+
+func (k *Key) injectFields(field *fields) {
+	field.self = k
+	if field.parent != nil {
+		key := k.ParentKey()
+		field.parent.parent = key
+		field.parent.field.Set(reflect.ValueOf(key))
+	}
+	if field.id != nil {
+		field.id.SetID(k.ID)
+	}
+}
+
+func (k *Key) IsSameKind(src interface{}) bool {
+	key := NewKey(src)
+	return key.Collection == k.Collection
+}
+
+func (k *Key) EqualsEntity(src interface{}) bool {
+	return k.Equals(NewKey(src))
+}
+
 func (k Key) Equals(other *Key) bool {
-	if k.ID == ""  || other.ID == "" {
+	if other == nil ||  k.ID == ""  || other.ID == "" {
 		return false
 	}
 	return k.ParentPath == other.ParentPath && k.Collection == other.Collection && k.ID == other.ID
 }
 
 func (k *Key) Update(fullPath string) {
-	r := regexp.MustCompile(`/documents/(.*)?/([^/]+)/(.+)$`)
+	r := regexp.MustCompile(`/documents/([^/]+)/([^/]+)$`)
+	if r.MatchString(fullPath) {
+		matchs := r.FindAllStringSubmatch(fullPath, -1)
+		k.ParentPath = ""
+		k.Collection = matchs[0][1]
+		k.ID = matchs[0][2]
+		return
+	}
+	r = regexp.MustCompile(`/documents/(.*)/([^/]+)/([^/]+)$`)
 	if r.MatchString(fullPath) {
 		matchs := r.FindAllStringSubmatch(fullPath, -1)
 		k.ParentPath = matchs[0][1]
@@ -73,7 +160,7 @@ func (k *Key) Update(fullPath string) {
 		k.ID = matchs[0][3]
 		return
 	}
-	r = regexp.MustCompile(`^(.*)?/([^/]+)/(.+)$`)
+	r = regexp.MustCompile(`^(.*)?/([^/]+)/([^/]+)$`)
 	if r.MatchString(fullPath) {
 		matchs := r.FindAllStringSubmatch(fullPath, -1)
 		k.ParentPath = matchs[0][1]
@@ -114,6 +201,10 @@ func (k Key) CreateDocumentRef(client *firestore.Client) *firestore.DocumentRef 
 
 func (k Key) CreateCollectionRef(client *firestore.Client) *firestore.CollectionRef {
 	return client.Collection(k.CollectionPath())
+}
+
+func (k Key) CreateGroupCollectionRef(client *firestore.Client) *firestore.CollectionGroupRef {
+	return client.CollectionGroup(k.Collection)
 }
 
 func (k Key) HasUniqueID() bool {

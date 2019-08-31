@@ -82,6 +82,9 @@ func (b *WriteBatchImpl) Commit() error {
 	for _, key := range b.matadatas {
 		metadata := LoadMetadata(b.cache, key)
 		metadata.DeleteAll()
+
+		group := LoadGroupMetaData(b.cache, key)
+		group.DeleteAll()
 	}
 
 	return nil

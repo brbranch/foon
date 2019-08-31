@@ -342,9 +342,9 @@ func Test_PutMulti(t *testing.T) {
 
 	key := NewKey(user)
 	devices := []*TestDevice{
-		&TestDevice{Parent: key, DeviceName: "Device001"},
-		&TestDevice{Parent: key, DeviceName: "Device002"},
-		&TestDevice{Parent: key, DeviceName: "Device003"},
+		{Parent: key, DeviceName: "Device001"},
+		{Parent: key, DeviceName: "Device002"},
+		{Parent: key, DeviceName: "Device003"},
 	}
 
 	if err := store.PutMulti(devices); err != nil {
@@ -691,6 +691,195 @@ func Test_GetAll(t *testing.T) {
 		assert.Equal(t, "TestUser", device4.Parent.Collection)
 		assert.Equal(t, user.UserID, device4.Parent.ID)
 		assert.Equal(t, device.DeviceID, device4.DeviceID)
+	}
+
+}
+
+func TestFoon_GetGroupByQuery(t *testing.T) {
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	os.Setenv("FIRESTORE_EMULATOR_HOST", "localhost:8915")
+	store, err := NewStoreWithProjectID(ctx, "everychart-dev")
+
+	if err != nil {
+		t.Fatalf("failed to create Foon Client (reason: %v)", err)
+	}
+
+	user := &TestUser{
+		UserID:   "kazuki.oda",
+		UserName: "kazuki",
+	}
+
+	if err := store.Put(user); err != nil {
+		t.Fatalf("failed to put user (reason: %v)", err)
+	}
+
+	key := NewKey(user)
+	devices := []*TestDevice{
+		&TestDevice{Parent: key, DeviceID: "device01", DeviceName: "Device001"},
+		&TestDevice{Parent: key, DeviceID: "device02", DeviceName: "Device002"},
+		&TestDevice{Parent: key, DeviceID: "device03", DeviceName: "Device003"},
+		&TestDevice{Parent: key, DeviceID: "device04", DeviceName: "Device008"},
+	}
+
+	if err := store.PutMulti(devices); err != nil {
+		t.Fatalf("failed to putMulti (reason: %v)", err)
+	}
+
+	dev := []*TestDevice{}
+
+	if err := store.GetGroupByQuery(&dev, NewConditions().Where("deviceName" , "==", "Device008")); err != nil {
+		t.Fatalf("failed to get group (reason:%v)", err)
+	}
+
+	assert.Equal(t, 1, len(dev))
+	assert.Equal(t, "Device008", dev[0].DeviceName)
+
+}
+
+func TestFoon_GetGroupByQuery_複数(t *testing.T) {
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	os.Setenv("FIRESTORE_EMULATOR_HOST", "localhost:8915")
+	store, err := NewStoreWithProjectID(ctx, "everychart-dev")
+
+	if err != nil {
+		t.Fatalf("failed to create Foon Client (reason: %v)", err)
+	}
+
+	users := []*TestUser {
+		{
+			UserID:   "user001",
+			UserName: "kazuki",
+		},
+		{
+			UserID:   "user002",
+			UserName: "kazuki2",
+		},
+	}
+
+	for _ , user := range users {
+		key := NewKey(user)
+		devices := []*TestDevice{
+			&TestDevice{Parent: key, DeviceID: "Device01", DeviceName: "Mevice001"},
+			&TestDevice{Parent: key, DeviceID: "Device02", DeviceName: "Mevice002"},
+			&TestDevice{Parent: key, DeviceID: "Device03", DeviceName: "Mevice003"},
+			&TestDevice{Parent: key, DeviceID: "Device04", DeviceName: "Mevice004"},
+			&TestDevice{Parent: key, DeviceID: "Device05", DeviceName: "Mevice001"},
+			&TestDevice{Parent: key, DeviceID: "Device06", DeviceName: "Mevice002"},
+			&TestDevice{Parent: key, DeviceID: "Device07", DeviceName: "Mevice003"},
+			&TestDevice{Parent: key, DeviceID: "Device08", DeviceName: "Mevice004"},
+		}
+		for _ , device := range devices {
+			if err := store.Delete(device); err != nil {
+				t.Fatalf("failed to delete devices (reason: %v)", err)
+			}
+		}
+		if err := store.Delete(user); err != nil {
+			t.Fatalf("failed to delete user (reason: %v)", err)
+		}
+	}
+
+	{
+		user := &TestUser{
+			UserID:   "user001",
+			UserName: "kazuki",
+		}
+
+		if err := store.Put(user); err != nil {
+			t.Fatalf("failed to put user (reason: %v)", err)
+		}
+
+		key := NewKey(user)
+		devices := []*TestDevice{
+			&TestDevice{Parent: key, DeviceID: "Device01", DeviceName: "Mevice001"},
+			&TestDevice{Parent: key, DeviceID: "Device02", DeviceName: "Mevice002"},
+			&TestDevice{Parent: key, DeviceID: "Device03", DeviceName: "Mevice003"},
+			&TestDevice{Parent: key, DeviceID: "Device04", DeviceName: "Mevice004"},
+		}
+
+		if err := store.PutMulti(devices); err != nil {
+			t.Fatalf("failed to putMulti (reason: %v)", err)
+		}
+	}
+
+	{
+
+		dev := []*TestDevice{}
+
+		if err := store.GetGroupByQuery(&dev, NewConditions().Where("deviceName", "==", "Mevice004")); err != nil {
+			t.Fatalf("failed to get group (reason:%v)", err)
+		}
+
+		assert.Equal(t, 1, len(dev))
+		assert.Equal(t, "Device04", dev[0].DeviceID)
+		assert.Equal(t, "Mevice004", dev[0].DeviceName)
+	}
+
+	{
+		user := &TestUser{
+			UserID:   "user002",
+			UserName: "kazuki2",
+		}
+
+		if err := store.Put(user); err != nil {
+			t.Fatalf("failed to put user (reason: %v)", err)
+		}
+
+		key := NewKey(user)
+		devices := []*TestDevice{
+			&TestDevice{Parent: key, DeviceID: "Device05", DeviceName: "Mevice001"},
+			&TestDevice{Parent: key, DeviceID: "Device06", DeviceName: "Mevice002"},
+			&TestDevice{Parent: key, DeviceID: "Device07", DeviceName: "Mevice003"},
+			&TestDevice{Parent: key, DeviceID: "Device08", DeviceName: "Mevice004"},
+		}
+
+		if err := store.PutMulti(devices); err != nil {
+			t.Fatalf("failed to putMulti (reason: %v)", err)
+		}
+	}
+
+	{
+
+		dev := []*TestDevice{}
+
+		if err := store.GetGroupByQuery(&dev, NewConditions().Where("deviceName", "==", "Mevice004")); err != nil {
+			t.Fatalf("failed to get group (reason:%v)", err)
+		}
+
+		if assert.Equal(t, 2, len(dev)) {
+			assert.Equal(t, "Device04", dev[0].DeviceID)
+			assert.Equal(t, "Mevice004", dev[0].DeviceName)
+			assert.Equal(t, "user001", dev[0].Parent.ID)
+			assert.Equal(t, "Device08", dev[1].DeviceID)
+			assert.Equal(t, "Mevice004", dev[1].DeviceName)
+			assert.Equal(t, "user002", dev[1].Parent.ID)
+		}
+	}
+
+	{
+
+		dev := []*TestDevice{}
+		user := &TestUser{
+			UserID:   "user002",
+			UserName: "kazuki2",
+		}
+
+		if err := store.GetByQuery(NewKey(&TestDevice{Parent:NewKey(user)}), &dev, NewConditions().Where("deviceName", "==", "Mevice004")); err != nil {
+			t.Fatalf("failed to get group (reason:%v)", err)
+		}
+
+		if assert.Equal(t, 1, len(dev)) {
+			assert.Equal(t, "Device08", dev[0].DeviceID)
+			assert.Equal(t, "Mevice004", dev[0].DeviceName)
+			assert.Equal(t, "user002", dev[0].Parent.ID)
+		}
 	}
 
 }

@@ -1,28 +1,53 @@
 package foon
 
 import (
+	"cloud.google.com/go/firestore"
+	"fmt"
 	"github.com/pkg/errors"
 	"reflect"
 	"strings"
 	"time"
-	"fmt"
-	"cloud.google.com/go/firestore"
 )
 
 type fields struct {
 	collection collectionField
-	id *idField
-	parent *parentField
-	self *Key
-	createdAt *createDate
-	updaetdAt *updateDate
+	id         *idField
+	parent     *parentField
+	self       *Key
+	createdAt  *createDate
+	updaetdAt  *updateDate
+}
+
+func getIdField(value reflect.Value) string {
+	if value.Type().Kind() == reflect.Ptr {
+		return getIdField(reflect.Indirect(value))
+	}
+	return getIdFieldFromType(value.Type())
+}
+
+func getIdFieldFromType(types reflect.Type) string {
+	for i := 0 ; i < types.NumField(); i ++ {
+		field := types.Field(i)
+		if field.Type.Kind() == reflect.Struct {
+			if id := getIdFieldFromType(field.Type); id != "" {
+				return id
+			}
+		}
+		if field.Tag.Get("foon") == "id" {
+			if field.Tag.Get("firestore") != "" {
+				return field.Tag.Get("firestore")
+			}
+			return field.Name
+		}
+	}
+	return ""
 }
 
 func newFields(src interface{}) (*fields, error) {
 	v := reflect.Indirect(reflect.ValueOf(src)).Type()
 	res := &fields{}
 	res.collection = newCollectionField(v)
-	id , err := newIDField(src)
+	id, err := newIDField(src)
 	if err != nil {
 		return nil, err
 	}
@@ -48,8 +73,9 @@ type collectionField struct {
 }
 
 type idField struct {
-	ID    string
-	field *reflect.Value
+	FieldName string
+	ID        string
+	field     *reflect.Value
 }
 
 type dateField struct {
@@ -65,17 +91,17 @@ type updateDate struct {
 }
 
 type parentField struct {
-	field *reflect.Value
+	field  *reflect.Value
 	parent *Key
 }
 
 func NewParentField(src interface{}) *parentField {
-	value, _ := getField(src, "parent")
+	value, _, _ := getField(src, "parent")
 	if value == nil {
 		return nil
 	}
 	if key, ok := value.Interface().(*Key); ok {
-		return  &parentField{value, key}
+		return &parentField{value, key}
 	}
 
 	return nil
@@ -115,21 +141,21 @@ func newCollectionField(t reflect.Type) collectionField {
 }
 
 func newIDField(src interface{}) (*idField, error) {
-	field, kind := getField(src, "id")
+	field, kind, name := getField(src, "id")
 	if field != nil {
 		if kind == reflect.String {
-			return &idField{field.String(), field}, nil
+			return &idField{name, field.String(), field}, nil
 		}
 		return nil, errors.New("foon id type is must be string")
 	}
-	return &idField{"", nil}, nil
+	return &idField{"", "", nil}, nil
 }
 
 func newDateField(src interface{}, foonType string) *dateField {
-	field, kind := getField(src, foonType)
-	if kind == reflect.Struct && field != nil{
-		if _ , ok := field.Interface().(time.Time); ok {
-			return &dateField{field}
+	value, kind , _ := getField(src, foonType)
+	if kind == reflect.Struct && value != nil {
+		if _, ok := value.Interface().(time.Time); ok {
+			return &dateField{value}
 		}
 	}
 	return &dateField{nil}
@@ -149,7 +175,7 @@ func (f *dateField) has() bool {
 
 func (f *dateField) get() time.Time {
 	if f.field == nil {
-		return time.Unix(0,0)
+		return time.Unix(0, 0)
 	}
 	return f.field.Interface().(time.Time)
 }
@@ -163,8 +189,12 @@ func (f *dateField) set(now time.Time) {
 
 func (f *fields) updateKey(ref *firestore.DocumentRef) {
 	if f.parent != nil {
-		f.parent.parent.Update(ref.Parent.Parent.Path)
-		f.parent.field.Set(reflect.ValueOf(f.parent.parent))
+		if f.parent.parent != nil {
+			f.parent.parent.Update(ref.Parent.Parent.Path)
+		}
+		if f.parent.field != nil {
+			f.parent.field.Set(reflect.ValueOf(f.parent.parent))
+		}
 	}
 }
 
@@ -178,19 +208,19 @@ func (f *updateDate) UpdateTime(now time.Time) {
 	f.set(now)
 }
 
-func getField(src interface{}, foonName string) (*reflect.Value, reflect.Kind) {
+func getField(src interface{}, foonName string) (*reflect.Value, reflect.Kind, string) {
 	v := reflect.Indirect(reflect.ValueOf(src))
 	return findField(v, "foon", foonName)
 }
 
-func findField(value reflect.Value, tagName string, tagValue string) (*reflect.Value, reflect.Kind) {
+func findField(value reflect.Value, tagName string, tagValue string) (*reflect.Value, reflect.Kind, string) {
 	typeName := value.Type()
 	fieldNum := typeName.NumField()
 	for i := 0; i < fieldNum; i++ {
 		field := typeName.Field(i)
 		if field.Tag.Get(tagName) == tagValue {
 			f := value.Field(i)
-			return &f, field.Type.Kind()
+			return &f, field.Type.Kind(), field.Name
 		}
 	}
 	for i := 0; i < fieldNum; i++ {
@@ -201,7 +231,7 @@ func findField(value reflect.Value, tagName string, tagValue string) (*reflect.V
 		}
 	}
 
-	return nil, reflect.Invalid
+	return nil, reflect.Invalid, ""
 }
 
 func (i *idField) SetID(id string) error {

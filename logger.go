@@ -16,7 +16,7 @@ type defaultLogger struct {
 }
 
 func (d defaultLogger) Trace(message string) {
-	log.Infof(d.c, "%s", message)
+	//log.Infof(d.c, "%s", message)
 }
 
 func (d defaultLogger) Warning(message string) {
@@ -27,7 +27,7 @@ func tracef(logger Logger, format string, args ...interface{}) {
 	if logger == nil {
 		return
 	}
-	logger.Trace(fmt.Sprintf(format, args...))
+	//logger.Trace(fmt.Sprintf(format, args...))
 }
 
 func warningf(logger Logger, format string, args ...interface{}) {
